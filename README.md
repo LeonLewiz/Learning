@@ -12,8 +12,8 @@
 
 ## 🏗️ Текущий стек и архитектура
 
-* **OS:** Arch Linux (минимальная ручная сборка) + KDE Plasma в качестве DE.
-* **Web-Server:** Nginx (настроен автозапуск через Systemd, оптимизированный reload).
+* **OS:** ~~Arch Linux (минимальная ручная сборка) + KDE Plasma в качестве DE.~~ Перешел на Ubuntu Server на второй день.
+* **Web-Server:** Nginx (настроен автозапуск через Systemd).
 * **CI/CD & Automation:** Локальные Bash-скрипты автоматизации деплоя, интегрированные с Git/GitHub.
 
 ---
