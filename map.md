@@ -1,33 +1,83 @@
+# 🗺️ map.md — карта проекта
+
 ## 1. Репозитории
-ansible-lab - репозиторий с плейбуками для ансибла.
-my-nginx-site - репозиторий с самим сайтом, Dockerfile.
 
-## 2. Точка входа
-Сначала руками подготовить control node: настроить доступ Ansible к Managed-nodes, вписать имена в hosts.ini, предоставить беспарольный доступ через SSH и IP-адреса. Потом `ansible-playbook -i hosts.ini install_docker.yml`. Потом можно запускать все остальные плейбуки.
+| Репо | Что внутри |
+|---|---|
+| `ansible-lab` | плейбуки, `hosts.ini`, `group_vars/`, шаблоны (`.j2`), дэшборды Grafana в `files/` |
+| `my-nginx-site` | сайт (`index.html`), бэкенд (`main.py`), `Dockerfile`, `docker-compose.yml` |
 
-## 3. Порядок
-После установки основного сайта можно запускать любой другой плейбук. Каждый отвечает за установку своей службы.
+---
 
-## 4. Порты, расположение служб, IP-адреса, имена машин, OC.
-backend - 8081:8000 - Managed
-website - 9090:80 - Managed
-cAdvisor - 8080:8080 - Managed
-Blackbox - 9115 - Control
-Prometheus - 9090 - Control
-NodeExporter - 9100 - All
-Grafana - 3000 - Control
-Alertmanager - 9093 - Control
+## 2. Инфраструктура
 
-3 виртуальные машины:
-Control - 192.168.13.130 - Ubuntu Server LTS 26.04
-Managed 1 - 192.168.13.133 - Ubuntu Server LTS 26.04.01
-Managed 2 - 192.168.13.134 - Debian Minimal 12
+| | Control | Managed 1 | Managed 2 |
+|---|---|---|---|
+| Hostname | `devops-study` | `vm2-ubuntu` | `vm3-debian` |
+| IP | `192.168.13.130` | `192.168.13.133` | `192.168.13.134` |
+| ОС | Ubuntu Server LTS 26.04 | Ubuntu Server LTS 26.04.01 | Debian Minimal 12 |
+| Роль | Ansible + мониторинг | сайт + метрики | сайт + метрики |
 
+- Ansible-группы в `hosts.ini`: `ubuntu_servers`, `debian_servers`, `monitoring` (control)
+- Доступ: SSH по ключу, `become` через `NOPASSWD` sudoers
+
+---
+
+## 3. Что где запущено
+
+### Control node
+| Сервис | Порт | Как |
+|---|---|---|
+| Prometheus | 9090 | systemd, тарболл в `/usr/local/bin/prometheus` |
+| Grafana | 3000 | systemd, тарболл в `/opt/grafana/` |
+| Alertmanager | 9093 | systemd, тарболл в `/usr/local/bin/alertmanager/` |
+| Node Exporter | 9100 | systemd |
+| Blackbox | 9115 | systemd |
+
+### Managed (обе)
+| Сервис | Порт | Как |
+|---|---|---|
+| website | 9090:80 | Docker |
+| backend | 8081:8000 | Docker |
+| PostgreSQL | 5432 (внутр.) | Docker, volume `pgdata` |
+| cAdvisor | 8080:8080 | Docker |
+| Node Exporter | 9100 | systemd |
+
+---
+
+## 4. Точка входа и порядок
+
+**Руками — только подготовка control node:**
+1. SSH-доступ к managed (ключи, беспарольный sudo)
+2. `hosts.ini` с именами/IP машин
+3. `~/new_vault_pass` с паролем vault
+4. `ansible.cfg` с указанием дефолтного инвентаря
+
+**Дальше всё плейбуками:**
+
+```bash
+ansible-playbook install_docker.yml      # сайт (точка входа)
+ansible-playbook install_prometheus.yml
+ansible-playbook install_grafana.yml
+ansible-playbook install_alertmanager.yml
+ansible-playbook install_blackbox.yml
+ansible-playbook install_node_exporter.yml
+ansible-playbook install_cadvisor.yml
+```
+
+Порядок после `install_docker.yml` - любой. Каждый плейбук ставит свою службу и **идемпотентен**.
+
+---
 
 ## 5. Секреты
-Все секреты (DB_PASSWORD, POSTGRES_PASSWORD) зашифрованы через Ansible-Vault моим личным паролем (.vault_pass) и лежат по пути `group_vars/all/vault.yml`. Файл ~/.vault_pass с паролем должен обязательно быть при запуске install_docker.yml, иначе не сработает.
+
+- Все секреты (`DB_PASSWORD`, `POSTGRES_PASSWORD`, `telegram_bot_token`, `telegram_chat_id`) зашифрованы **Ansible Vault**
+- Файл: `group_vars/all/vault.yml`
+- Пароль: `~/new_vault_pass` (обязателен при запуске, иначе Ansible встанет)
+- Публичные переменные - `group_vars/all/vars.yml`
+
+```yaml
 # vars.yml
-```yml
 project_dir: /var/www/html/my-nginx-site
 db_host: db
 db_name: site_analytics
@@ -35,28 +85,52 @@ db_user: myuser
 web_port: 9090
 backend_port: 8081
 ```
-# .env.j2
-```yml
-# db container
-POSTGRES_USER={{ db_user }}
-POSTGRES_PASSWORD={{ POSTGRES_PASSWORD }}
-POSTGRES_DB={{ db_name }}
 
-# backend
-DB_HOST={{ db_host }}
-DB_USER={{ db_user }}
-DB_PASSWORD={{ DB_PASSWORD }}
-DB_NAME={{ db_name }}
+---
+
+## 6. Мониторинг - полная цепочка
+
 ```
-## 6. CI
-CI был настроен через Github Actions и self-hosted runner. Подключены оба репозитория - ansible-lab и my-nginx-site. При Коммите в ansible-lab в этот репозиторий самостоятельно загружаются новые файлы. При Коммите в my-nginx-site CI билдит из новых файлов образ и отправляет в Github Packages и пересоздает контейнеры на Managed-nodes.
+blackbox щупает сайт (module http_2xx)
+      │  probe_success == 0
+      ▼
+Prometheus (job: blackbox → ?target=<сайт>)
+      │  правило SiteDown, for: 5m (rules.yml)
+      ▼
+Alertmanager (localhost:9093)
+      ▼
+Telegram (send_resolved: true)
+```
 
-## 7. Dashboards
-Все дэшборды хранятся в `ansible-lab/files/` в режиме provisioned. В случае чего переживут удаление.
-## 8. Не знаю
-список всего, что не понял
-Плохо разбираюсь с докером.
-  -Healthchecks
-  -Multi-stage
-  -Basic Dockerfile structure
-Проблемы с базовыми командами и ключами Linux. Нужно заучить.
+**Скрейп-джобы Prometheus:** `prometheus` (self), `node_exporter` (all), `cadvisor` (managed), `blackbox` (проверка сайтов).
+
+**Важно:** `scrape_interval` в `prometheus.yml` **и** `timeInterval` в datasource Grafana = `15s`. Должны совпадать — иначе `$__rate_interval` ломается.
+
+---
+
+## 7. Grafana dashboards
+
+- Лежат в `ansible-lab/files/`, отдаются **provisioned** через `provider.yml`
+- `allowUiUpdates: false` → источник только файл
+- Дэшборды ссылаются на datasource **по реальному uid** (плейсхолдеры `${DS_PROMETHEUS}` заменены)
+
+---
+
+## 8. Ещё не сделано (план)
+
+| # | Задача | Зачем |
+|---|---|---|
+| 1 | **CI** (GitHub Actions + self-hosted runner) | автодеплой при коммите |
+| 2 | **Bootstrap control node** (Vagrant) | убрать ручную подготовку |
+| 3 | **Terraform** | IaC |
+
+> CI раньше был, но при сносе системы не восстановлен. Планируется вернуть.
+
+---
+
+## 9. Слабое место - Docker
+
+Надо доучить:
+- `Dockerfile`: структура, `healthcheck`, multi-stage
+
+**Linux-база:** базовые команды и права - подтягивать в процессе.
